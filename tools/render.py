@@ -23,6 +23,7 @@
 原理见 docs/字体.md。许可：GPL-3.0
 """
 import argparse
+import os
 from PIL import Image, ImageDraw, ImageFont
 
 W = 384          # PD01 打印头宽度（点）
@@ -30,14 +31,51 @@ PAD = 8
 NL = chr(10)
 DEFAULT_CJK = '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc'
 DEFAULT_LAT = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+# 兜底中文字体：主字体缺字时逐字退到这里，保证不出方块/空框
+DEFAULT_RESCUE = '/usr/share/fonts/truetype/ayu/SourceHanSerifCN-Regular.otf'
 
 
 def load(path, size):
     return ImageFont.truetype(path, size)
 
 
+_CJK_PROBE_CACHE = {}
+
+
+def _probe_cjk(font):
+    """这个字体到底带不带中文。样本字点阵全一样 => 是占位方框，不是中文。"""
+    key = id(font)
+    if key in _CJK_PROBE_CACHE:
+        return _CJK_PROBE_CACHE[key]
+    ok = False
+    try:
+        seen = set()
+        for ch in '甜心爱云遇江风花天地':
+            m = font.getmask(ch)
+            if m.size[0] <= 0 or m.size[1] <= 0:
+                break
+            seen.add(bytes(m))
+        else:
+            ok = len(seen) > 1
+    except Exception:
+        ok = False
+    _CJK_PROBE_CACHE[key] = ok
+    return ok
+
+
 def has_glyph(font, ch):
-    """这个字体里到底有没有这个字。没有则 getmask 返回空。"""
+    """这个字体里到底有没有这个字。
+
+    - 汉字：先过 _probe_cjk 整字体体检（防占位方框），再看点阵是否为空。
+    - 其它：点阵非空即算有。
+    """
+    try:
+        cp = ord(ch)
+    except Exception:
+        cp = 0
+    is_cjk = 0x2E80 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF or 0xF900 <= cp <= 0xFAFF
+    if is_cjk and not _probe_cjk(font):
+        return False
     try:
         m = font.getmask(ch)
         return m.size[0] > 0 and m.size[1] > 0
@@ -45,13 +83,15 @@ def has_glyph(font, ch):
         return False
 
 
-def build_picker(cjk, latin):
-    """逐字符挑字体：中文优先，缺字退拉丁，再不济退回中文字体（不出空框）。"""
+def build_picker(cjk, latin, rescue=None):
+    """逐字符挑字体：中文优先 -> 拉丁 -> 兜底中文字体。绝不吐方块。"""
     def pick(ch):
         if has_glyph(cjk, ch):
             return cjk
         if has_glyph(latin, ch):
             return latin
+        if rescue is not None and has_glyph(rescue, ch):
+            return rescue
         return cjk
     return pick
 
@@ -116,7 +156,13 @@ def render(text, cjk_path, latin_path, size, lh, track, thresh, xoff, ruler,
            align='center'):
     cjk = load(cjk_path, size)
     latin = load(latin_path, size)
-    pick = build_picker(cjk, latin)
+    rescue = None
+    if DEFAULT_RESCUE and os.path.exists(DEFAULT_RESCUE):
+        try:
+            rescue = load(DEFAULT_RESCUE, size)
+        except Exception:
+            rescue = None
+    pick = build_picker(cjk, latin, rescue)
     probe = ImageDraw.Draw(Image.new('L', (10, 10)))
 
     def measure(ch, font):
@@ -166,7 +212,13 @@ def render_calib(text, cjk_path, latin_path, size, lh, track, thresh, offsets):
     """
     cjk = load(cjk_path, size)
     latin = load(latin_path, size)
-    pick = build_picker(cjk, latin)
+    rescue = None
+    if DEFAULT_RESCUE and os.path.exists(DEFAULT_RESCUE):
+        try:
+            rescue = load(DEFAULT_RESCUE, size)
+        except Exception:
+            rescue = None
+    pick = build_picker(cjk, latin, rescue)
     probe = ImageDraw.Draw(Image.new('L', (10, 10)))
 
     def measure(ch, font):
